@@ -1,0 +1,264 @@
+---
+title: "HS_Spatial_09292022"
+author: "Neha Chaudhary"
+date: "9/29/2022"
+output: html_document
+---
+
+```{r setup, echo = FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	cache.lazy = FALSE
+)
+library(SingleCellExperiment)
+library(Seurat)
+library(tidyverse)
+library(kableExtra)
+library(magick)
+#library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(xlsx)
+
+```
+
+
+```{r Load, message=FALSE, warning=FALSE, cache=TRUE, include=FALSE}
+# Load metadata from Excel file (sheet 1) 
+metadata <- read.xlsx("Metadata.xlsx", sheetIndex = 1)
+# Construct the full file path for each sample's count data
+metadata$File_location <- paste("/sc/wo/tri_data/IRP/Visium/2022_08_Visium_samples/count_files/HS/",metadata$File_name,"/outs", sep = "")
+# Clean names for project and slide location fields
+metadata$project_name <- gsub("_count","", metadata$File_name)
+metadata$project_name <- gsub("-","_", metadata$project_name)
+metadata$Slide.Location<- gsub("-","", metadata$Slide.Location)
+
+# Set working directory to the folder containing all HS sample count files
+setwd("count_files/HS/")
+# Get folder names matching HS sample count directories
+folders <- (Sys.glob("*_count"))
+
+# Rename tissue positions files for all samples (if required by pipeline)
+for(i in 1:length(folders)){
+  # Prepare source and target filenames
+  from <- paste0(folders[i],"/outs/spatial/tissue_positions.csv")
+  to <- paste0(folders[i],"/outs/spatial/tissue_positions_list.csv")
+  # Rename the file for compatibility
+  file.rename(from, to)
+}
+
+# Loop over samples
+for(i in 1:length(metadata$File_name)){
+    # Load Visium spatial count data for the sample
+    Data<- Load10X_Spatial(data.dir = metadata$File_location[i],slice = metadata$Slide.Location[i])
+    # Annotate Seurat object metadata and name
+    Data@meta.data$sample = metadata$Slide.Location[i]
+    Data@project.name <-metadata$project_name[i]
+    
+    # Extract the metadata from the Seurat object
+    meta <- Data@meta.data  # Retrieve existing metadata from the Seurat object
+
+    # Read in the new annotation file for the current sample
+    class <- read.delim2(metadata$class[i], sep = ",")  # Read annotation/class information from file
+    class$Barcode <- paste(meta$sample[1], class$Barcode, sep = "_")  # Prefix barcodes with sample name for uniqueness
+    rownames(class) <- class$Barcode  # Set new barcodes as row names
+    
+    # Merge the new class annotations into the Seurat metadata
+    meta <- merge(meta, class, by = 'row.names', all = TRUE)  # Merge on rownames (barcodes)
+    rownames(meta) <- meta$Row.names  # Restore rownames from merge results
+    meta <- meta[,-c(1,6)]  # Remove the now redundant 'Row.names' and column 6 (if unnecessary)
+    
+    # Update the Seurat object with the new metadata
+    Data@meta.data <- meta  # Save updated metadata back to the object
+    
+    # Annotate cells based on cluster ID values
+    Data$annotation <- "others"              # Start by labeling all cells as "others"
+    Data$annotation[Data$id == 1] = "Epidermis"        # Assign "Epidermis" to cells where id == 1
+    Data$annotation[Data$id == 2] = "Inflammation"     # Assign "Inflammation" to cells where id == 2
+    Data$annotation[Data$id == 3] = "Tendril/HF"       # Assign "Tendril/HF" to cells where id == 3
+    Data$annotation[Data$id == 4] = "Dermis"           # Assign "Dermis" to cells where id == 4
+     # Rename all cells/spots with a unique prefix for the sample
+    Data <- RenameCells(Data, new.names = paste(metadata$Slide.Location[i],colnames(Data), sep = "_"))
+    
+    metadata$orig_spots[i] <- length(colnames(Data)) # Store original spot count
+    # Optional: Filter spots by feature count for QC (keep only those >500 features)
+    Data = Data[, Data$nFeature_Spatial > 500] 
+    metadata$filtered_spots[i] <- length(colnames(Data))# Store after-filtered count
+    # Normalize data using SCTransform method (robust, recommended for spatial transcriptomics)
+    Data <- SCTransform(Data, assay = "Spatial", verbose = FALSE)
+    # Assign each processed object to a variable so they can be merged later
+    assign(metadata$project_name[i], Data)
+    rm(Data)
+}
+
+# Merge all loaded and processed samples into a single Seurat object named hs_all
+hs_all <- merge(`045_12_A1_CS_21003_C_16_HS`,y = c(`046_12_B1_CS_21003_C_16_HS`,`047_12_C1_CS_21003_E_16_HS`,`048_12_D1_CS_21003_E_16_HS`,`049_13_A1_CS_21003_F_21_HS`,`050_13_B1_CS_21003_F_21_HS`,`051_13_C1_CS_21003_F_3_HS`,`052_13_D1_CS_21003_C_22_HS`,`053_14_A1_CS_21003_E_22_HS`,`054_14_B1_CS_21003_E_22_HS`,`055_14_C1_CS_21003_E_25_HS`,`056_14_D1_CS_21003_E_25_HS`,`057_15_A1_CS_21003_C_61_HS`,`058_15_B1_CS_21003_C_61_HS`,`059_15_C1_CS_21003_C_63_HS`,`060_15_D1_CS_21003_C_63_HS`,`061_16_A1_CS_21003_F_15_HS`,`062_16_B1_CS_21003_F_15_HS`,`063_16_C1_CS_21003_E_27_HS`,`064_16_D1_CS_21003_E_27_HS`,`065_17_A1_CS_21003_F_50_HS`,`066_17_B1_CS_21003_F_50_HS`,`067_17_C1_CS_21003_E_79_HS`,`068_17_D1_CS_21003_E_79_HS`,`069_18_A1_CS_21003_F_88_HS`,`070_18_B1_CS_21003_F_88_HS`,`071_18_C1_CS_21003_E_18_HS`,`073_19_A1_CS_21003_F_6_HS`,`074_19_B1_CS_21003_C_24_HS`,`075_19_C1_CS_21003_E_30_HS`,`076_19_D1_CS_21003_E_30_HS`,`077_20_A1_CS_21003_E_48_HS`,`078_20_B1_CS_21003_E_48_HS`,`079_20_C1_CS_21003_C_48_HS`,`080_20_D1_CS_21003_C_48_HS`,`081_21_A1_CS_21003_F_57_HS`,`082_21_B1_CS_21003_F_57_HS`,`083_21_C1_CS_21003_C_59_HS`,`084_21_D1_CS_21003_C_59_HS`,`085_22_A1_CS_21003_F_64_HS`,`086_22_B1_CS_21003_F_64_HS`,`087_22_C1_CS_21003_F_77_HS`,`089_23_A1_CS_21003_E_82_HS`,`090_23_B1_CS_21003_E_82_HS`,`091_23_C1_CS_21003_F_90_HS`,`092_23_D1_CS_21003_F_90_HS`,`093_24_A1_CS_21003_C_35_HS`,`094_24_B1_CS_21003_E_24_HS`,`095_24_C1_CS_21003_F_25_HS`,`096_24_D1_CS_21003_E_50_HS`,`133_10_A1_CT_19061_A_27_HS`,`134_10_B1_CT_19051_D_3_HS`,`135_10_C1_CT_19061_A_10_HS`,`136_10_D1_CT_19051_D_4_HS`), project= "HS")
+
+```
+
+
+```{r Quality, echo=FALSE, fig.height=12, fig.width=12, cache=TRUE}
+
+# mt (mitochondrial) and hb (hemoglobin) genes are absent in the FFPE spatial transcriptomics panel
+DefaultAssay(hs_all) <- "Spatial" # Set the default assay for plotting/analysis to 'Spatial' (expression data)
+
+# Violin plot of the number of detected features (genes) per spot, split and grouped by 'sample', no legend shown
+VlnPlot(hs_all, features = c("nFeature_Spatial"), pt.size = 0.1, split.by = "sample",group.by = "sample") + NoLegend()
+# Violin plot of the number of UMIs (transcripts) per spot, split and grouped by 'sample', no legend shown
+VlnPlot(hs_all, features = c("nCount_Spatial"), pt.size = 0.1, split.by = "sample",group.by = "sample") + NoLegend()
+
+```
+
+
+
+```{r quality_2, echo=FALSE, fig.height=12, fig.width=24, cache=TRUE}
+# Add a new column to metadata containing image names prefixed with 'X' and the slide location
+metadata$imagename <- paste0("X",metadata$Slide.Location)
+
+# Ensure image coordinate data types are integers for downstream compatibility
+for(i in 1:length(imagenames)){
+  hs_all@images[[imagenames[i]]]@coordinates[["tissue"]] <- as.integer(hs_all@images[[imagenames[i]]]@coordinates[["tissue"]])
+  hs_all@images[[imagenames[i]]]@coordinates[["row"]] <- as.integer(hs_all@images[[imagenames[i]]]@coordinates[["row"]])
+  hs_all@images[[imagenames[i]]]@coordinates[["col"]] <- as.integer(hs_all@images[[imagenames[i]]]@coordinates[["col"]])
+  hs_all@images[[imagenames[i]]]@coordinates[["imagerow"]] <- as.integer(hs_all@images[[imagenames[i]]]@coordinates[["imagerow"]])
+  hs_all@images[[imagenames[i]]]@coordinates[["imagecol"]] <- as.integer(hs_all@images[[imagenames[i]]]@coordinates[["imagecol"]])
+}
+# Create spatial feature plots to visualize UMI (nCount_Spatial) and gene (nFeature_Spatial) distributions
+# across the first 4 tissue images, using the specified image locations
+SpatialFeaturePlot(hs_all, features = c("nCount_Spatial", "nFeature_Spatial"),images = metadata$Slide.Location[1:4])
+
+```
+
+
+
+```{r clustering, cache=TRUE, include=FALSE, fig.height=12, fig.width=12 }
+# Set the default assay to SCTransform-normalized data
+DefaultAssay(hs_all) <- "SCT"  # Using SCTransform for downstream normalization and analysis
+
+# Combine variable features from each sample into the merged object
+
+VariableFeatures(hs_all) <- unique(c(VariableFeatures(`045_12_A1_CS_21003_C_16_HS`), VariableFeatures(`046_12_B1_CS_21003_C_16_HS`), VariableFeatures(`047_12_C1_CS_21003_E_16_HS`), VariableFeatures(`048_12_D1_CS_21003_E_16_HS`), VariableFeatures(`049_13_A1_CS_21003_F_21_HS`), VariableFeatures(`050_13_B1_CS_21003_F_21_HS`), VariableFeatures(`051_13_C1_CS_21003_F_3_HS`), VariableFeatures(`052_13_D1_CS_21003_C_22_HS`), VariableFeatures(`053_14_A1_CS_21003_E_22_HS`), VariableFeatures(`054_14_B1_CS_21003_E_22_HS`), VariableFeatures(`055_14_C1_CS_21003_E_25_HS`), VariableFeatures(`056_14_D1_CS_21003_E_25_HS`), VariableFeatures(`057_15_A1_CS_21003_C_61_HS`), VariableFeatures(`058_15_B1_CS_21003_C_61_HS`), VariableFeatures(`059_15_C1_CS_21003_C_63_HS`), VariableFeatures(`060_15_D1_CS_21003_C_63_HS`), VariableFeatures(`061_16_A1_CS_21003_F_15_HS`), VariableFeatures(`062_16_B1_CS_21003_F_15_HS`), VariableFeatures(`063_16_C1_CS_21003_E_27_HS`), VariableFeatures(`064_16_D1_CS_21003_E_27_HS`), VariableFeatures(`065_17_A1_CS_21003_F_50_HS`), VariableFeatures(`066_17_B1_CS_21003_F_50_HS`), VariableFeatures(`067_17_C1_CS_21003_E_79_HS`), VariableFeatures(`068_17_D1_CS_21003_E_79_HS`), VariableFeatures(`069_18_A1_CS_21003_F_88_HS`), VariableFeatures(`070_18_B1_CS_21003_F_88_HS`), VariableFeatures(`071_18_C1_CS_21003_E_18_HS`), VariableFeatures(`073_19_A1_CS_21003_F_6_HS`), VariableFeatures(`074_19_B1_CS_21003_C_24_HS`), VariableFeatures(`075_19_C1_CS_21003_E_30_HS`), VariableFeatures(`076_19_D1_CS_21003_E_30_HS`), VariableFeatures(`077_20_A1_CS_21003_E_48_HS`), VariableFeatures(`078_20_B1_CS_21003_E_48_HS`), VariableFeatures(`079_20_C1_CS_21003_C_48_HS`), VariableFeatures(`080_20_D1_CS_21003_C_48_HS`), VariableFeatures(`081_21_A1_CS_21003_F_57_HS`), VariableFeatures(`082_21_B1_CS_21003_F_57_HS`), VariableFeatures(`083_21_C1_CS_21003_C_59_HS`), VariableFeatures(`084_21_D1_CS_21003_C_59_HS`), VariableFeatures(`085_22_A1_CS_21003_F_64_HS`), VariableFeatures(`086_22_B1_CS_21003_F_64_HS`), VariableFeatures(`087_22_C1_CS_21003_F_77_HS`), VariableFeatures(`089_23_A1_CS_21003_E_82_HS`), VariableFeatures(`090_23_B1_CS_21003_E_82_HS`), VariableFeatures(`091_23_C1_CS_21003_F_90_HS`), VariableFeatures(`092_23_D1_CS_21003_F_90_HS`), VariableFeatures(`093_24_A1_CS_21003_C_35_HS`), VariableFeatures(`094_24_B1_CS_21003_E_24_HS`), VariableFeatures(`095_24_C1_CS_21003_F_25_HS`), VariableFeatures(`096_24_D1_CS_21003_E_50_HS`), VariableFeatures(`133_10_A1_CT_19061_A_27_HS`), VariableFeatures(`134_10_B1_CT_19051_D_3_HS`), VariableFeatures(`135_10_C1_CT_19061_A_10_HS`), VariableFeatures(`136_10_D1_CT_19051_D_4_HS`)))
+
+
+# Perform PCA for dimensionality reduction
+hs_all <- RunPCA(hs_all, verbose = FALSE)  
+
+# Find neighbors for graph-based clustering using first 30 principal components
+hs_all <- FindNeighbors(hs_all, dims = 1:30)
+
+# Identify clusters at multiple resolutions
+hs_all <- FindClusters(hs_all, verbose = FALSE, resolution = seq(from=0.1, to=0.2, by=0.01))
+
+# Run UMAP for visualization of clusters
+hs_all <- RunUMAP(hs_all, dims = 1:30)
+
+# Sets current cluster identity fot 0.13 with 11 clusterz
+Idents(hs_all) <- "SCT_snn_res.0.13"  
+
+# Plot UMAP colored by clusters
+DimPlot(hs_all, reduction = "umap", raster=FALSE)
+
+# Plot UMAP split by treatment for comparison between ADA vs PLB
+DimPlot(hs_all, reduction = "umap", group.by = c("ident"), split.by = "treatment")
+
+
+# Set the default assay to 'Spatial' for marker analysis
+DefaultAssay(hs_all) <- 'Spatial'  # Switches context to 'Spatial' for downstream marker analysis
+
+# Identify marker genes for all clusters
+markers_hs_all <- FindAllMarkers(
+  object = hs_all,                 # Seurat object
+  only.pos = TRUE,                 # Only positive markers (upregulated)
+  logfc.threshold = 0.25,          # Minimum log fold-change for markers
+  min.pct = 0.1,                   # Marker must be expressed in at least 10% of target cells
+  verbose = TRUE                   # Print progress to console
+)
+
+# Write all markers to a single Excel sheet named 'All_clusters'
+write.xlsx(markers_hs_all, file = "HS_visium_markers.xlsx", sheetName = "All_clusters", append = TRUE)
+
+# Loop over clusters 0 through 11 and write each cluster's markers to a separate sheet
+for(i in 1:12){
+  cluster <- markers_hs_all[markers_hs_all$cluster == as.character(i-1),]  # Subset markers corresponding to the current cluster
+  write.xlsx(cluster, file = "HS_visium_markers.xlsx", sheetName = paste0("Cluster_", i-1), append = TRUE)  # Write to Excel, create a new sheet per cluster
+}
+
+```
+
+
+```{r heatmap, cache=TRUE, include=FALSE, fig.height=12, fig.width=12 }
+
+# Assuming you have run FindAllMarkers and stored results in 'markers_hs_all'
+# Select top 10 markers (by avg_log2FC or other criteria) for each cluster
+top10_markers <- markers_hs_all %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 10) %>%
+  pull(gene)
+
+# Plot heatmap for these genes
+DoHeatmap(hs_all, features = top10_markers, group.by = 'SCT_snn_res.0.13') +
+  theme(axis.text.y = element_text(size = 6))
+
+# This will generate a heatmap of expression values for top 10 marker genes per cluster, grouped by cluster identities.
+
+```
+
+
+
+```{r plot_UMI_feature_cluster_annotation}
+
+for(i in 1:length(imagenames)) {
+  # Subset data for the current image/sample
+  data1 <- subset(x = Data, subset = sample == gsub("X", "", imagenames[i]))
+  
+  # Plot spatial dimensions with H&E image, no legend
+  SpatialDimPlot(data1, images = imagenames[i], alpha = 0) + 
+    ggtitle(paste(imagenames[i], "H&E", sep = "_")) + 
+    NoLegend()
+  
+  # Set minimum and maximum limits for nCount_Spatial
+  min_lim <- 500
+  max_lim <- signif(max(data1$nCount_Spatial), 2)
+  # Visualize nCount_Spatial feature with custom color scale and legend
+  SpatialFeaturePlot(data1, features = c("nCount_Spatial"), images = imagenames[i]) + 
+    scale_fill_gradient2(
+      low = "navyblue", mid = "green", high = "yellow", 
+      midpoint = (max_lim - min_lim) / 2, space = "Lab", 
+      na.value = "grey50", guide = "colourbar", aesthetics = "fill", 
+      limits = c(min_lim, max_lim)) + 
+    guides(fill = guide_colorbar(barwidth = 8, barheight = 1)) + 
+    theme(
+      legend.position = "top", legend.justification = "right", 
+      legend.margin = margin(0, 0, 0, 0), legend.box.margin = margin(-10, 0, -10, 0)
+    ) + 
+    labs(fill = "nUMI")
+  
+  # Set minimum and maximum limits for nFeature_Spatial
+  min_lim <- 500
+  max_lim <- signif(max(data1$nFeature_Spatial), 2)
+  # Visualize nFeature_Spatial feature with custom color scale and legend
+  SpatialFeaturePlot(data1, features = c("nFeature_Spatial"), images = imagenames[i]) + 
+    scale_fill_gradient2(
+      low = "navyblue", mid = "green", high = "yellow", 
+      midpoint = (max_lim - min_lim) / 2, space = "Lab", 
+      na.value = "grey50", guide = "colourbar", aesthetics = "fill", 
+      limits = c(min_lim, max_lim)) + 
+    guides(fill = guide_colorbar(barwidth = 8, barheight = 1)) + 
+    theme(
+      legend.position = "top", legend.justification = "right", 
+      legend.margin = margin(0, 0, 0, 0), legend.box.margin = margin(-10, 0, -10, 0)
+    ) + 
+    labs(fill = "nGenes")
+  
+  # Plot annotated spatial dimensions, no legend
+  SpatialDimPlot(Data, images = imagenames[i]) + 
+    ggtitle(paste(imagenames[i], "Annotation", sep = "_")) + 
+    NoLegend()
+}
+
+```

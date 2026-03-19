@@ -1,0 +1,377 @@
+---
+title: "Bulk_RNAseq_Analysis"
+author: "Neha Chaudhary"
+date: "9/29/2022"
+output: html_document
+---
+
+```{r setup, results = FALSE,warning=FALSE,message=FALSE,echo=TRUE, include=FALSE}
+### Step 1) Setup the environment and load necessary libraries
+library(knitr)
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	cache.lazy = FALSE
+)
+library(tidyverse)
+library(RColorBrewer)
+library(edgeR)
+library(pheatmap)
+library(readxl)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(ggfortify)
+#library(apeglm)
+library(DT)
+library(ggrepel)
+#library(devEMF)
+library(readr)
+#library(tximeta)
+#library(tximport)
+library(SummarizedExperiment)
+library(shiny)
+library(tibble)
+library(clusterProfiler)
+library("plotly")
+#library(pcaExplorer)
+library(EnhancedVolcano)
+#library(vsn)
+library(limma)
+```  
+
+
+```{r Loading Metadata and count, include=FALSE}
+## Step 2) Load Metadata and Count matrix
+#counts <- read.delim("/projects/tri-data/IRP/Visium/2022_08_Visium_samples/2022_08_HS_bulk_RNA_seq/Goodreau_s6080_MGI3223_225282_HS/all.gene_counts.tsv")
+counts <- read.delim("all.gene_counts.tsv") # Load the gene count matrix from a TSV file
+counts <- counts[,c(1,3,8:107)]# Subset specific columns from the counts file
+counts <- unique(counts)  # Remove duplicated rows
+
+# Set ensembl id as rownames
+rownames(counts) <- counts[,1]  # Use first column (Ensembl id as row names
+counts <- counts[,-1]           # Remove the first column after setting row names
+
+
+# Read metadata file
+metadata <- read.xlsx("metadata.xlsx", sheetIndex = 1)  # Load sample metadata from first sheet
+metadata$Time.Point[which(metadata$Treatment == "Healthy ")] = "Healthy"
+metadata <- as.data.frame(metadata)  # Ensure it is a data.frame
+rownames(metadata) <- metadata$Sample_name  # Set rownames of metadata by sample name
+
+# Reorder and subset count data
+counts_temp <- counts[,c(2:101)]  # Subset counts for columns 2 to 101 (presumably samples)
+counts_temp <- setcolorder(counts_temp, as.character(metadata$Filenames))  # Reorder columns by filenames from metadata
+counts <- cbind(counts[,1], counts_temp)  # Combine the original gene symbol column with reordered counts
+colnames(counts)[1] <- "gene_symbols"  # Name the first column as gene_symbols
+rm(counts_temp)
+
+#For ensembl IDs with same gene symbol, take median value for duplicate genes
+# Create mapping between rownames and gene symbols
+mapT <- cbind(rownames(counts), counts[,1])  # Map row names to gene symbols
+
+# Create data without the gene_symbols column
+data <- counts[,-1]  # Remove gene_symbols column for analysis
+
+# Function: For duplicated gene symbols, merge rows by computing median across samples
+mergeF <- function(id, data){
+  a <- data[id,]              # Subset data for given IDs (genes)
+  a <- apply(a, 2, median)    # Calculate the median for each sample (column)
+  return(a)
+}
+
+# Apply mergeF to handle duplicate genes, grouping by gene symbol
+x <- tapply(mapT[,1], mapT[,2], mergeF, data)
+y <- do.call(rbind, x)   # Combine the merged data into one data.frame
+y <- as.data.frame(y)
+
+
+# Prepare the final count matrix
+cts <- as.matrix(y)  # Convert the final count data.frame to a matrix
+head(cts, 2)  # Display first 2 rows of the final count matrix
+
+# Check sample (column) names consistency
+all(colnames(cts) %in% metadata$Filenames)  # Ensure all count matrix columns are present in metadata
+all(metadata$Filenames == colnames(cts))    # Test if metadata and counts have the same order
+rm(x,y,mapT,data)
+
+# Reordering count matrix columns to match metadata
+colnames(cts) <- rownames(metadata)  # Set column names of count matrix to sample names
+# Check again whether the coldata and count matrix are ordered the same
+
+#head(cts, 2)  # Show first two rows for confirmation
+
+```
+
+
+### Step 1) Quality Control
+
+```{r Negative Binomial distribution, echo=FALSE}
+#check if the data follows negative binomial distribution(mean < variance)
+# Calculate the mean of counts for each gene across selected samples (columns 5 to 18) - same group
+mean_counts <- apply(cts[, 5:18], 1, mean)
+# Calculate the variance of counts for each gene across the same set of samples
+variance_counts <- apply(cts[, 5:18], 1, var)
+df <- data.frame(mean_counts, variance_counts)  # Create a data frame with mean and variance columns for plotting
+
+# Plot the relationship between mean and variance
+# Points: Each point represents a gene's mean and variance across samples
+# Line: The red line (variance = mean) is drawn for reference; points above this suggest overdispersion (variance > mean), which is characteristic of a negative binomial distribution
+# Log scales: Both axes are log-transformed to better visualize wide ranges of mean/variance values
+
+ggplot(df) +
+  geom_point(aes(x=mean_counts, y=variance_counts)) + 
+  geom_line(aes(x=mean_counts, y=mean_counts, color="red")) +
+  scale_y_log10() +
+  scale_x_log10()
+ 
+rm(df, mean_counts, variance_counts)
+```
+
+Figure:  Negative Binomial distribution  
+Incase of Binomial distribution the variance is greater than the mean and hence the curve. The straight red line indicated mean == variance which is the condition for Poisson distribution. 
+
+### Step 2) Filtering and Differential gene expression analysis (limma)
+
+Number of genes pre filtering:  
+
+```{r filter and limma, echo=FALSE}
+## Create DESeq2Dataset object
+# Create grouping factor based on metadata
+groups <- factor(metadata$Combine)  # Define sample groups for differential analysis
+
+# Create DGEList object using counts and group info
+dge <- DGEList(counts=cts, group=groups)  # DGEList is used for edgeR differential analysis
+
+# Filter out genes with low read counts
+
+dim(dge)[1]  # Check the number of genes before filtering
+
+# Calculate Counts Per Million (CPM) normalized by library size (Jing's method for proteomics)
+m <- sweep(dge$counts, 2, 1e6 / dge$samples$lib.size, `*`)  # Normalize counts for each sample
+
+min_count_no <- 0.2 * length(groups)  # Minimum number of samples required for each gene (20% of samples)
+ridx <- rowSums(m > 2) >= floor(min_count_no)  # Identify genes with CPM >2 in enough samples
+
+# Keep only filtered genes in the DGEList object
+dge <- dge[ridx,]  # Subset DGEList to keep robustly expressed genes
+
+# Check the number of genes/features remaining in the DGEList after filtering
+# dim(dge)[1] returns the number of rows (genes) in your filtered DGEList
+
+dim(dge)[1]  # Number of genes/features after filtering
+rm(m, min_count_no,ridx)
+```
+
+Number of genes post filtering:  
+
+```{r limma2, echo=FALSE}
+# Normalize library sizes using the TMM method, which adjusts for compositional bias
+# This prepares your count data for more accurate downstream comparisons
+
+dge <- calcNormFactors(dge, method = "TMM")  # Calculates normalization factors using TMM and adds them to DGEList
+
+# Set up the design matrix for differential expression analysis
+# The design matrix encodes the experimental grouping of samples for model fitting
+nf <- calcNormFactors(dge$counts,method="TMM")
+design <- model.matrix(~0 + dge$samples$group, data = dge$samples) # Builds a design matrix (no intercept) for group comparison
+
+# Estimate dispersion of counts, which reflects sample-to-sample or biological variability
+dge <- estimateCommonDisp(dge, verbose = TRUE)  # Estimate common dispersion across all genes
+bcv <- sqrt(dge$common.dispersion)  # Calculate the biological coefficient of variation
+
+# Run voom transformation to convert counts into log2-counts per million (logCPM) with associated precision weights
+# voom adjusts for mean-variance relationship, making data suitable for linear modeling (limma)
+# The plot argument will produce a mean-variance trend plot
+# lib.size ensures library size normalization using precomputed factors
+vm <- voom(dge$counts,design,plot=TRUE,
+           lib.size=colSums(dge$counts)*nf, save.plot=T)
+rm(bcv)
+```  
+
+
+
+```{r PLot count data, echo=FALSE,fig.height=6, fig.width=8}
+# Visualize raw counts for each sample
+# Summing raw counts for each sample before normalization
+# 'cts' is your raw count matrix; 'colSums(cts)' computes total reads per sample
+# 'metadata$Sample_name' assigns sample names to each column
+# 'metadata$Combine' assigns each sample to its group
+
+df_dds_preN <- data.frame(
+  counts = colSums(cts),                # Total counts (reads) per sample before normalization
+  sample = metadata$Sample_name,         # Sample identifiers
+  group = metadata$Combine               # Group label for each sample
+)
+
+# Visualize raw counts for each sample
+# Each bar represents total counts for a sample, colored by group
+# x-axis: sample, y-axis: total counts
+# Rotating axis text aids readability for many samples
+# 'theme_bw()' gives a clean background; adjust text angle for clarity
+
+ggplot(df_dds_preN, aes(x = sample, y = counts, fill = group)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ggtitle("Count before voom normalization")
+
+# Prepare a new data frame for counts after voom normalization
+# 'vm$E' contains the normalized expression data (logCPM from voom)
+# colSums(vm$E) summarizes normalized expression across all genes, per sample
+# Sample/group assignment remains unchanged
+
+df_dds <- data.frame(
+  counts = colSums(vm$E),                # Total normalized counts per sample after voom
+  sample = metadata$Sample_name,         # Sample identifiers
+  group = metadata$Combine               # Group label for each sample
+)
+
+# Visualize normalized counts for each sample, using similar settings
+# Compare this plot to the pre-normalization plot to observe normalization impact
+
+ggplot(df_dds, aes(x = sample, y = counts, fill = group)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ggtitle("Count after voom normalization")
+
+rm(df_dds,df_dds_preN)
+
+```  
+
+
+#### Figure: The plot shows the total number of reads in each sample - pre and post normalization
+
+```{r Week13_healthy_PCA, echo=FALSE, warning=FALSE,fig.height=7, fig.width=10}
+# Get normalized expression data (log2-CPM from voom)
+Normalized_data <- vm$E # 'vm$E' contains normalized expression values from voom()
+
+# Subset metadata for samples at Week 13 or Healthy control
+meta_sub <- metadata[metadata$Time.Point == "Week 13"|metadata$Time.Point == "Healthy",]
+# Subset data matrix to include only relevant samples
+data1 <- as.data.frame(Normalized_data[,meta_sub$Sample_name])
+
+# Calculate SD for each gene across selected samples
+l <- apply(data1,1,sd)
+# Sort genes by SD in decreasing order (most variable genes first)
+l <- sort(l, decreasing = T)
+# Select the top 1000 most variable genes
+d <- data1[names(l)[1:1000],]
+
+# Perform PCA on the selected genes (samples as observations)
+pca_ori <- prcomp(t(d), scale. = TRUE)  # Transpose so columns are genes
+summary(pca_ori)  # Summary of PCA variance explained
+
+
+# Prepare data frame for ggplot
+# principal components + sample annotations
+df_out <- as.data.frame(pca_ori$x)
+df_out$Treatment <- meta_sub$Treatment
+df_out$Group <- meta_sub$Combine
+df_out$response <- meta_sub$Response
+df_out$timepoint <- meta_sub$Time.Point
+df_out$condition <- meta_sub$condition
+
+# Calculate percentage of variance explained by each principal component
+PoV <- pca_ori$sdev^2 / sum(pca_ori$sdev^2)  # Proportion of variance
+Percentage_var <- PoV * 100
+
+# Build the PCA scatter plot
+ggplot(df_out, aes(x=PC1, y=PC2, color=Group)) +
+  xlab(paste("PC1(", round(Percentage_var[1], 2), "%)", sep="")) +
+  ylab(paste("PC2(", round(Percentage_var[2], 2), "%)", sep="")) +
+  scale_shape_manual(values=c(3,4,7,8,15,16,17,18,10)) +
+  geom_point(size=3) +
+  stat_ellipse()  # Add ellipses for groups
+```
+
+
+
+
+```{r Week13 NR pCA plot}
+# Subset metadata for Week 13 non-responders
+meta_sub <- metadata[metadata$Response == "NR",]  # Keep only samples designated 'NR' (non-responders)
+meta_sub <- meta_sub[meta_sub$Time.Point == "Week 13",]  # Further subset to only those at 'Week 13'
+
+# Extract expression data for these samples
+data1 <- as.data.frame(Normalized_data[,meta_sub$Sample_name])
+
+# Calculate standard deviation for each gene across selected samples
+l <- apply(data1, 1, sd)  # Compute SD gene-wise
+l <- sort(l, decreasing = TRUE)  # Sort genes by variability
+
+d <- data1[names(l)[1:1000], ]  # Select top 1000 most variable genes
+library(ggfortify)  # For advanced plotting support
+
+# Perform PCA on transposed data (samples as rows)
+pca_ori <- prcomp(t(d), scale. = TRUE)
+#summary(pca_ori)  # Shows proportion of variance explained and other stats
+
+# Prepare data frame for plotting
+# Combine principal components with sample annotations
+df_out <- as.data.frame(pca_ori$x)
+df_out$Treatment <- meta_sub$Treatment  # Add treatment info
+df_out$response <- meta_sub$Response  # Add response status
+df_out$Group <- meta_sub$Combine      # Add combined group label
+
+# Calculate percentage of variance explained by PC1 and PC2
+PoV <- pca_ori$sdev^2 / sum(pca_ori$sdev^2)  # Eigenvalues normalized
+Percentage_var <- PoV * 100
+
+# Build the PCA plot
+# Color points by 'Group'; customize axis labels with variance explained
+ggplot(df_out, aes(x=PC1, y=PC2, color=Group)) +
+  xlab(paste("PC1(", round(Percentage_var[1], 2), "%)", sep="")) +
+  ylab(paste("PC2(", round(Percentage_var[2], 2), "%)", sep="")) +
+  scale_shape_manual(values=c(3,4,7,8,15,16,17,18,10)) + # Manual shape mapping if shape aes used
+  geom_point(size=3) +      # Plot points, size 3
+  stat_ellipse()            # Add group ellipses to visualize spread
+
+```
+
+
+
+```{r deg between comparisons}
+# Create grouping factor from 'Combine' column in metadata (after cleaning names)
+groups <- factor(make.names(metadata$Combine))
+
+# Build design matrix for limma analysis using the sample groups
+design <- model.matrix(~0 + groups, data = dge$samples)
+
+# Define contrasts of interest for the analysis
+contrast.mat <- makeContrasts(
+  ADA.vs.Placebo_NR_Week13 = groupsADA_NR_Week.13 - groupsPlacebo_NR_Week.13,
+  ADA.vs.Placebo_R_Week13 = groupsADA_R_Week.13 - groupsPlacebo_R_Week.13,
+  levels = design
+)
+
+# Fit linear model to normalized expression values
+fit <- lmFit(vm, design)
+# Apply contrasts to fitted model
+fit2 <- contrasts.fit(fit, contrast.mat)
+# Empirical Bayes moderation of statistics
+fit2 <- eBayes(fit2)
+
+# Optionally remove variables not needed from the environment (except important ones)
+# rm(list = setdiff(ls(), c('metadata', 'Normalized_data', 'fit2', 'vm')))
+
+i = i - 1  # Decrement index (likely for iterating through contrasts)
+# Get all significant differentially expressed genes for the selected contrast
+DEG <- topTable(
+  fit2,
+  coef = colnames(fit2$coefficients)[i],
+  number = nrow(vm$E),
+  adjust.method = 'fdr'
+)
+# Add gene symbols as the first column
+DEG <- cbind(rownames(DEG), DEG)
+colnames(DEG)[1] <- 'Genes'
+# Build output filename for results (using contrast name)
+filename <- paste(colnames(fit2$coefficients)[i], '.csv', sep = '')
+# filename now contains the name of the contrast (e.g., 'ADA.vs.Placebo_NR_Week13.csv')
+
+```
+

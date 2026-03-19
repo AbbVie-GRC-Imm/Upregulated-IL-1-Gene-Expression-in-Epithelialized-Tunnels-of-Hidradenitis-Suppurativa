@@ -1,0 +1,203 @@
+---
+title: "RCTD on Visium samples"
+author: "Neha Chaudhary"
+date: "2023-03-10"
+output: html_document
+---
+
+```{r setup, echo = FALSE, results=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	cache.lazy = FALSE
+)
+library(SingleCellExperiment)
+library(Seurat)
+library(spacexr)
+library(Matrix)
+library(doParallel)
+library(ggplot2)
+
+```
+
+```{r load reference data, message=FALSE, warning=FALSE, cache=TRUE, include=FALSE}
+# Load the integrated single-cell data object
+scData <- readRDS("HS_and_Normal_integrated_manual_annotation.rds")
+
+# Remove cells labeled as 'Unasigned' from the dataset
+scData <- subset(scData, idents = "Unasigned", invert = TRUE)
+
+# Extract the RNA count matrix from the 'RNA' assay
+counts <- scData@assays$RNA@counts
+
+# Get cell type annotations for each cell and name them by cell barcode
+cell_types <- scData@meta.data$Cluster_annotations
+names(cell_types) <- rownames(scData@meta.data) # Name vector with cell barcodes
+cell_types <- as.factor(cell_types) # Convert cell type vector to a factor
+
+# Get the total UMI counts per cell and name them by cell barcode
+nUMI <- scData$nUMI
+names(nUMI) <- rownames(scData@meta.data)
+
+# Construct the reference object for downstream analysis (e.g., RCTD)
+reference <- Reference(counts, cell_types, nUMI)
+
+# Save the reference object for future use
+saveRDS(reference, 'HS_and_normal_single_cell_reference_RCTD_downsamples_10000_11132024.rds')
+
+# Remove all objects except 'reference' from the workspace to free up memory
+rm(list=setdiff(ls(), c("reference")))
+```
+
+
+```{r Load Visiusm data and run RCTD, message=FALSE, warning=FALSE, cache=TRUE, include=FALSE}
+
+# Read metadata from Excel file containing sample information
+metadata <- read.xlsx("Metadata_all.xlsx", sheetIndex = 1)
+
+# Build file paths for each sample's count data output folder
+metadata$File_location <- paste("/count_files/HS/",metadata$File_name,"/outs", sep = "")
+# Create a clean project name by removing '_count' and replacing '-' with '_'
+metadata$project_name <- gsub("_count","", metadata$File_name)
+metadata$project_name <- gsub("-","_", metadata$project_name)
+# Remove '-' characters from the slide location names
+metadata$Slide.Location<- gsub("-","", metadata$Slide.Location)
+
+# Switch to the directory containing classification CSV files
+setwd("Classification/")
+# Identify classification files for samples using a pattern match
+folders <- (Sys.glob("*_class.csv"))
+
+# Assign corresponding classification file names to metadata
+metadata$class <- folders
+
+# Change working directory to one with RCTD outputs
+setwd("RCTD_Full/")
+
+# Iterate through each sample listed in metadata
+for(i in 1:length(metadata$File_name)){
+  # Print the sample index for monitoring loop progress
+  print(i)
+  # Load spatial transcriptomics data for the sample
+  Data<- Load10X_Spatial(data.dir = metadata$File_location[i],slice = metadata$Slide.Location[i])
+  # Store sample and project information in metadata
+  Data@meta.data$sample = metadata$Slide.Location[i]
+  Data@project.name <-metadata$project_name[i]
+  
+  # Format image name and ensure all spatial coordinates are integers
+  imagename <- paste0("X", metadata$Slide.Location[i])
+  Data@images[[imagename]]@coordinates[["tissue"]] <- as.integer(Data@images[[imagename]]@coordinates[["tissue"]])
+  Data@images[[imagename]]@coordinates[["row"]] <- as.integer(Data@images[[imagename]]@coordinates[["row"]])
+  Data@images[[imagename]]@coordinates[["col"]] <- as.integer(Data@images[[imagename]]@coordinates[["col"]])
+  Data@images[[imagename]]@coordinates[["imagerow"]] <- as.integer(Data@images[[imagename]]@coordinates[["imagerow"]])
+  Data@images[[imagename]]@coordinates[["imagecol"]] <- as.integer(Data@images[[imagename]]@coordinates[["imagecol"]])
+
+  # Extract metadata for further processing
+  meta <- Data@meta.data
+  # Change directory to where classification CSVs are stored
+  setwd("Classification/")
+  
+  # Read classification file for current sample
+  class <- read.delim2(metadata$class[i], sep = ",")
+
+  # Set barcodes as row names in the classification table
+  rownames(class) <- class$Barcode
+  # Merge Seurat metadata with classification results by barcode
+  meta <- merge(meta,class,by = 'row.names',all= TRUE)
+  # Set row names and remove unnecessary columns from merged metadata
+  rownames(meta) <- meta$Row.names
+  meta <- meta[,-c(1,6)]
+  
+  # Update Seurat object metadata with merged info
+  Data@meta.data <- meta
+
+  # Annotate tissue regions with descriptive labels based on numeric ID
+  Data$annotation <- "others"
+  Data$annotation[Data$id == 1] = "Epidermis"
+  Data$annotation[Data$id == 2] = "Inflammation"
+  Data$annotation[Data$id == 3] = "Tendril/HF"
+  Data$annotation[Data$id == 4] = "Dermis"
+
+  # Extract spatial coordinates and expression count matrix
+  coords <- GetTissueCoordinates(Data)
+  counts <- Data@assays$Spatial@counts
+ 
+  # Assign nUMI (number of UMIs) per barcode
+  nUMI = Data$nCount_Spatial; names(nUMI) = rownames(Data@meta.data)
+
+  # Create puck (SpatialRNA object) for RCTD analysis
+  puck <- SpatialRNA(coords, counts, nUMI)
+
+  # Print count matrix dimensions for QC and plot histogram of logged nUMI values
+  print(dim(puck@counts)) # observe Digital Gene Expression matrix
+  hist(log(puck@nUMI,2)) # histogram of log_2 nUMI
+  
+  # Filter out spots with fewer than 500 genes detected
+  Data = Data[, Data$nFeature_Spatial > 500]
+  barcodes <- rownames(Data@images[[imagename]]@coordinates)
+
+  # Restrict puck to filtered barcodes only
+  puck <- restrict_puck(puck, barcodes) 
+
+  # Visual QC plot of nUMI distribution across selected barcodes
+  plot_puck_continuous(puck, barcodes, puck@nUMI, ylimit = c(0,round(quantile(puck@nUMI,0.9))), title ='plot of nUMI') 
+
+  # Perform cell type deconvolution using RCTD
+  myRCTD <- create.RCTD(puck, reference, max_cores = 8)
+  myRCTD <- run.RCTD(myRCTD, doublet_mode = 'full')
+  # Set appropriate directory for saving RCTD results
+  setwd("RCTD_Full")
+  # Save RCTD result object for the sample
+  saveRDS(myRCTD,paste(metadata$project_name[i],"RCTD_full.rds",sep = "_"))
+
+  # Normalize RCTD weights and merge them into metadata
+  barcodes <- colnames(myRCTD@spatialRNA@counts)
+  weights <- myRCTD@results$weights
+  norm_weights <- normalize_weights(weights)
+  norm_weights <- as.data.frame(norm_weights)
+  Data@meta.data <- cbind(Data@meta.data,norm_weights)
+
+  # Re-normalize data using SCTransform
+  Data <- SCTransform(Data, assay = "Spatial", verbose = FALSE)
+  # Save updated Seurat object with data normalization and assigned name
+  assign(metadata$project_name[i], Data)
+
+  # Clean up workspace by removing temporary objects to free memory
+  rm(coords,counts,Data,puck,barcodes,imagename,nUMI, weights, norm_weights,X_vals,N_X,K_val,S_mat,Q_mat,meta,class,myRCTD)
+  save.image("temp_RCTD.RData") # Optionally save workspace image for debugging
+}
+
+```
+
+
+```{r Combine into large dataset, message=FALSE, warning=FALSE, cache=TRUE, include=FALSE}
+
+HS_RCTD <- merge(`045_12_A1_CS_21003_C_16_HS`,y = c(`046_12_B1_CS_21003_C_16_HS`,`047_12_C1_CS_21003_E_16_HS`,`048_12_D1_CS_21003_E_16_HS`,
+                                                   `049_13_A1_CS_21003_F_21_HS`,`050_13_B1_CS_21003_F_21_HS`, `051_13_C1_CS_21003_F_3_HS`, 
+                                                   `052_13_D1_CS_21003_C_22_HS`, `053_14_A1_CS_21003_E_22_HS`,`054_14_B1_CS_21003_E_22_HS`,
+                                                   `056_14_D1_CS_21003_E_25_HS`, `057_15_A1_CS_21003_C_61_HS`,
+                                                   `058_15_B1_CS_21003_C_61_HS`,`059_15_C1_CS_21003_C_63_HS`,`060_15_D1_CS_21003_C_63_HS`,
+                                                   `061_16_A1_CS_21003_F_15_HS`,`062_16_B1_CS_21003_F_15_HS`,`063_16_C1_CS_21003_E_27_HS`,
+                                                   `064_16_D1_CS_21003_E_27_HS`,`065_17_A1_CS_21003_F_50_HS`,`066_17_B1_CS_21003_F_50_HS`,
+                                                   `067_17_C1_CS_21003_E_79_HS`,`068_17_D1_CS_21003_E_79_HS`,`069_18_A1_CS_21003_F_88_HS`,
+                                                   `070_18_B1_CS_21003_F_88_HS`,`071_18_C1_CS_21003_E_18_HS`,`073_19_A1_CS_21003_F_6_HS`,
+                                                   `074_19_B1_CS_21003_C_24_HS`,`075_19_C1_CS_21003_E_30_HS`,`076_19_D1_CS_21003_E_30_HS`,
+                                                   `077_20_A1_CS_21003_E_48_HS`,`078_20_B1_CS_21003_E_48_HS`,`079_20_C1_CS_21003_C_48_HS`,
+                                                   `080_20_D1_CS_21003_C_48_HS`,`081_21_A1_CS_21003_F_57_HS`,`082_21_B1_CS_21003_F_57_HS`,
+                                                   `083_21_C1_CS_21003_C_59_HS`,`084_21_D1_CS_21003_C_59_HS`,`085_22_A1_CS_21003_F_64_HS`,
+                                                   `086_22_B1_CS_21003_F_64_HS`,`087_22_C1_CS_21003_F_77_HS`,`089_23_A1_CS_21003_E_82_HS`,
+                                                   `090_23_B1_CS_21003_E_82_HS`,`091_23_C1_CS_21003_F_90_HS`,`092_23_D1_CS_21003_F_90_HS`,
+                                                   `093_24_A1_CS_21003_C_35_HS`,`094_24_B1_CS_21003_E_24_HS`,`095_24_C1_CS_21003_F_25_HS`,
+                                                   `096_24_D1_CS_21003_E_50_HS`,`133_10_A1_CT_19061_A_27_HS`,`134_10_B1_CT_19051_D_3_HS`,
+                                                   `135_10_C1_CT_19061_A_10_HS`,`136_10_D1_CT_19051_D_4_HS`), project= "HS_RCTD",
+                                                    add.cell.ids = c("12A1", "12B1","12C1","12D1","13A1","13B1","13C1","13D1","14A1","14B1","14D1","15A1","15B1",
+                                                                  "15C1","15D1","16A1","16B1","16C1","16D1","17A1","17B1","17C1","17D1","18A1","18B1",
+                                                                  "18C1","19A1","19B1","19C1","19D1","20A1","20B1","20C1","20D1","21A1","21B1","21C1",
+                                                                  "21D1","22A1","22B1","22C1","23A1","23B1","23C1","23D1","24A1", "24B1", "24C1", "24D1",
+                                                                  "34A1", "34B1", "34C1", "34D1"))
+
+
+```

@@ -1,0 +1,113 @@
+---
+title: "GSEA_loop_HS_Visium"
+author: "Neha Chaudhary"
+date: "10/11/2023"
+output: html_document
+---
+
+
+### Step 1) Setup the environment and load necessary libraries
+
+```{r setup, results = FALSE,warning=FALSE,message=FALSE,echo=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+  echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	cache.lazy = FALSE
+)
+#BiocManager::install("clusterProfiler")
+#BiocManager::install("pathview")
+#BiocManager::install("enrichplot")
+library(clusterProfiler)
+library(enrichplot)
+# we use ggplot2 to add x axis labels (ex: ridgeplot)
+library(ggplot2)
+#BiocManager::install("org.Mm.eg.db")
+library(org.Hs.eg.db)
+#set path
+setwd("GSEA/")
+#create folder to save the results
+if (!dir.exists("GSEA_results_tables/")){
+dir.create("GSEA_results_tables/")
+} else {
+    print("Dir already exists!")
+}
+
+```
+
+
+### Step 2) Data Preprocesing
+
+Gene set enrichment analysis is run using the GO Biological processes database.
+
+Pathways with Adjusted P value <=0.05 were saved to file.
+
+For the figures, any pathway involved in metabolism or reproduction (contains "repro" or "metabol" in description) have been excluded but are included in the tables.  
+
+
+```{r preprocessing}
+
+# Assign path to the differential expression gene (DEG) file
+file1 <- "path to deg"
+
+# Read in the DEG file as a table, setting the first column as row names and specifying comma separator
+deg <- read.delim(file1, header=T, sep = ",", row.names = 1)
+
+# Extract log2 fold change values for each gene
+original_gene_list <- deg$logFC
+
+# Set gene names as the names of the vector
+names(original_gene_list) <- rownames(deg)
+
+# Remove any NA values (missing data) from the gene list
+gene_list <- na.omit(original_gene_list)
+
+# Sort the gene list in decreasing order, as required by clusterProfiler
+gene_list = sort(gene_list, decreasing = TRUE)
+
+# Set a random seed for reproducibility
+set.seed(123456)
+
+# Run Gene Set Enrichment Analysis (GSEA) using clusterProfiler's gseGO function
+#  - geneList: ordered vector of gene logFC values
+#  - ont: ontology, "BP" for Biological Process
+#  - OrgDb: organism database, "org.Hs.eg.db" for human
+#  - keyType: gene identifier type, here SYMBOL
+#  - pvalueCutoff: p-value threshold, set to 1 for all results
+gse <- gseGO(geneList=gene_list, 
+             ont = "BP",
+             OrgDb = org.Hs.eg.db,
+             keyType = "SYMBOL",
+             pvalueCutoff = 1)
+
+# Extract the results from the gseGO output
+gsea_results <- gse@result
+
+# Construct output file name by appending the input file name (minus ".csv")
+file <- paste("GSEA_results_tables/GSEA_GO_BP_", gsub(".csv","",file), ".txt", sep = "")
+
+# Save the results table to a tab-delimited text file, without quotes
+write.table(gsea_results, file, quote=F, sep="\t")
+
+```
+
+
+### Dotpot
+
+Number of significantly enriched pathways - `r dim(gsea_results)[1]`
+
+Number of pathway shown below ~ 30
+
+```{r dotplot, fig.height=10, fig.width=8}
+
+#dotplot
+require(DOSE)
+dotplot(gse, showCategory= 15
+        , split=".sign") + facet_grid(.~.sign) + theme(axis.text.y = element_text(size = 8))
+
+```
+
+
+

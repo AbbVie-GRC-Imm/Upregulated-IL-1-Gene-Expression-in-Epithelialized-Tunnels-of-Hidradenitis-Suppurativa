@@ -1,0 +1,110 @@
+---
+title: "Over representation analysis"
+author: "Neha Chaudhary"
+date: "10/11/2023"
+output: html_document
+---
+
+### Step 1) Setup the environment and load necessary libraries
+
+```{r setup, results = FALSE,warning=FALSE,message=FALSE,echo=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+  echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = FALSE,
+	cache.lazy = FALSE
+)
+BiocManager::install("clusterProfiler")
+BiocManager::install("pathview")
+BiocManager::install("enrichplot")
+library(clusterProfiler)
+library(enrichplot)
+# we use ggplot2 to add x axis labels (ex: ridgeplot)
+library(ggplot2)
+BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+library(ensembldb)
+library(tidyverse)
+
+library(enrichplot)
+library(dplyr)
+
+#set dir
+setwd("Over_representation_analysis/")
+
+#create folder to save results
+if (!dir.exists("ORA_results_tables")){
+dir.create("ORA_results_tables")
+} else {
+    print("Dir already exists!")
+}
+
+
+```
+
+
+### Step 2) Data Preprocesing
+
+Pathway enrichment analysis/over representation analysis is run using the GO Biological process database.
+
+
+```{r preprocessing}
+
+
+# Specify the path to the DEG file as input
+file1 <- "path to deg file"
+
+# Read the DEG results into a data frame
+deg <- read.delim(file1, header = TRUE, sep = ",", row.names = 1)
+
+# Extract all gene names tested (used as the universe/background for enrichment)
+all_genes <- rownames(deg)
+
+# Flag genes as significant: logFC >= 2 and adjusted p-value <= 0.05
+deg$threshold <- as.logical((deg$logFC >= 2) & deg$adj.P.Val <= 0.05)
+# Subset to only significant DEGs
+sig_deg <- deg[which(deg$threshold == TRUE),]
+
+# Extract the symbols of significant genes for ORA
+sig_genes <- rownames(sig_deg)
+
+# Perform GO enrichment for Biological Processes (BP) using clusterProfiler
+era <- enrichGO(
+  gene = sig_genes,               # List of significant genes
+  universe = all_genes,           # All genes tested as the background
+  keyType = "SYMBOL",            # Use gene symbol as the key type
+  OrgDb = org.Hs.eg.db,           # Human gene annotation database
+  ont = "BP",                    # Biological Process ontology
+  pAdjustMethod = "BH",          # Benjamini-Hochberg adjustment for multiple testing
+  pvalueCutoff = 1                # No p-value threshold applied (capture all results)
+)
+
+# Convert enrichment results to a data frame for saving/output
+ora_results <- as.data.frame(ora)
+
+# Construct output file name for saving GO BP results
+txt_output <- paste("ORA_results_tables/ORA_GO_BP_", gsub(".csv", "", file), ".txt", sep = "")
+
+# Write the ORA results to a tab-delimited text file
+write.table(ora_results, txt_output, quote = FALSE, sep = "\t")
+```
+
+
+### Dotpot
+
+Number of significantly enriched pathways - `r dim(ora_results)[1]`
+
+Number of pathway shown below - 20
+
+```{r dotplot, fig.height=8, fig.width=6}
+
+#dotplot
+require(DOSE)
+## Dotplot 
+  dotplot(ora, showCategory=20) + theme(axis.text.y = element_text(size =8))
+```  
+
+
+

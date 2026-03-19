@@ -1,0 +1,272 @@
+---
+title: "Pseudobulk_Analysis_HS_Visium"
+author: "Neha Chaudhary"
+date: "2022-12-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	cache.lazy = FALSE
+)
+library(xlsx)
+library(Seurat)
+library(tidyr)
+library(ggplot2)
+library(limma)
+library(edgeR)
+```
+
+
+Read the data and create pseudobulk
+
+```{r loaddata}
+#read the combined Visium dataset
+Hs_data <- readRDS("HS_Visium_Data.RDS")
+Hs_meta <- Hs_data@meta.data[,c(4,6)]
+
+#create bulk data
+HS_Bulk <-  Seurat:::PseudobulkExpression(object = hs_normals, pb.method = 'aggregate',assays = "Spatial", slot = 'counts',group.by = c("sample","id","response"))
+HS_Bulk <- as.data.frame(HS_Bulk)
+colnames(HS_Bulk) <- gsub("Spatial.","", colnames(HS_Bulk))
+
+# remove all samples that are poor quality - less than 30 spots per section
+to_exclude_EP <- c("12B1_Epidermis_ADA_NR","13B1_Epidermis_ADA_NR","14A1_Epidermis_ADA_NR","15D1_Epidermis_ADA_NR","16B1_Epidermis_ADA_PR","16D1_Epidermis_ADA_PR","21C1_Epidermis_PLB_NR","21D1_Epidermis_PLB_NR",
+                   "24D1_Epidermis_ADA_PR","34C1_Epidermis_PLB_NR","34D1_Epidermis_PLB_NR")
+to_exclude_Inflammation<- c("11D1_Inflammation_Normals","12A1_Inflammation_ADA_NR","12C1_Inflammation_ADA_NR","13A1_Inflammation_ADA_NR","14D1_Inflammation_ADA_NR","15B1_Inflammation_ADA_NR",
+                            "16C1_Inflammation_ADA_PR","16D1_Inflammation_ADA_PR","17B1_Inflammation_ADA_PR","18A1_Inflammation_ADA_PR","18B1_Inflammation_ADA_PR","18C1_Inflammation_PLB_NR",
+                            "19B1_Inflammation_PLB_NR","19C1_Inflammation_PLB_NR","19D1_Inflammation_PLB_NR","22B1_Inflammation_PLB_NR","24B1_Inflammation_PLB_NR","24C1_Inflammation_ADA_NR",
+                            "34B1_Inflammation_PLB_NR","34D1_Inflammation_PLB_NR")
+
+to_exclude_Tendril <- c("9D1_Tendril.HF_Normals","10D1_Tendril.HF_Normals","11B1_Tendril.HF_Normals","11D1_Tendril.HF_Normals","15B1_Tendril.HF_ADA_NR","15C1_Tendril.HF_ADA_NR",
+                        "16A1_Tendril.HF_ADA_PR", "16B1_Tendril.HF_ADA_PR", "17B1_Tendril.HF_ADA_PR","18A1_Tendril.HF_ADA_PR","19A1_Tendril.HF_PLB_NR","19C1_Tendril.HF_PLB_NR","20B1_Tendril.HF_PLB_NR",
+                        "20C1_Tendril.HF_PLB_NR", "20D1_Tendril.HF_PLB_NR","22B1_Tendril.HF_PLB_NR","23A1_Tendril.HF_PLB_NR", "24B1_Tendril.HF_PLB_NR","24C1_Tendril.HF_ADA_NR","34A1_Tendril.HF_PLB_NR",
+                        "34C1_Tendril.HF_PLB_NR")
+
+
+to_exclude <- c(to_exclude_EP,to_exclude_Inflammation,to_exclude_Tendril)
+
+#remove excluded
+HS_Bulk_filtered <- HS_Bulk[,!(colnames(HS_Bulk) %in% to_exclude)]
+
+```
+
+
+
+```{r create metadata, echo=FALSE}
+# Extract column names from the filtered data
+meta_bulk <- colnames(HS_Bulk_filtered)
+
+# Duplicate the column names into two columns: 'Samples' and 'Region'
+meta_bulk <- cbind(meta_bulk, meta_bulk)
+
+# Convert to a data frame
+meta_bulk <- as.data.frame(meta_bulk)
+
+# Rename the columns to 'Samples' and 'Region'
+colnames(meta_bulk) <- c('Samples', 'Region')
+
+# Split the 'Region' column into 'Section', 'Region', and 'Treatment' using underscore as separator
+meta_bulk <- separate(meta_bulk, col = Region, into = c('Section', 'Region', 'Treatment'), sep = '_', extra = 'merge')
+
+# Set the row names of the data frame to the sample names
+rownames(meta_bulk) <- meta_bulk$Samples
+```
+
+
+
+```{r deg, echo=FALSE}
+# Check if the row names of meta_bulk match the column names of HS_Bulk_filtered
+all(rownames(meta_bulk) == colnames(HS_Bulk_filtered))
+
+# Remove samples containing 'others' from meta_bulk
+meta_bulk <- meta_bulk[-(grep('others', meta_bulk$Samples)),]
+
+# Reorder columns of HS_Bulk_filtered to match the filtered sample order in meta_bulk
+HS_Bulk_filtered <- HS_Bulk_filtered[, meta_bulk$Samples]
+
+
+# Create a combined group column by concatenating 'Region' and 'Treatment' with an underscore
+meta_bulk$groups <- paste(meta_bulk$Region, meta_bulk$Treatment, sep = "_")
+
+# Convert the 'groups' column to a factor for use in differential analysis
+groups <- factor(meta_bulk$groups)
+
+# Create a DGEList object for downstream edgeR analysis, with counts and grouping info
+dge <- DGEList(counts=HS_Bulk_filtered, group = groups)
+
+# (Optional) Remove unused objects to clean up environment
+# rm(mapT, x, id_data, col_1, genes, mart, G_list_1)
+
+# Show number of features (e.g., genes or proteins) before filtering
+dim(dge)[1]
+
+# CPM filtering: keep features with at least 1 CPM in ≥20% samples
+# First, calculate CPM for every sample
+m <- sweep(dge$counts, 2, 1e6 / dge$samples$lib.size, `*`)
+# Minimum number of samples required for feature retention
+min_count_no <- 0.2 * length(groups)
+# Identify features passing the CPM cutoff in sufficient samples
+ridx <- rowSums(m > 2) >= floor(min_count_no)
+
+# Filter out features not meeting CPM criteria
+dge <- dge[ridx,]
+
+# Show number of features after filtering
+dim(dge)[1]
+
+# Calculate normalization factors using TMM method for library size correction
+dge <- calcNormFactors(dge, method="TMM")
+
+# Calculate normalization factors on count matrix (used for downstream applications if needed)
+nf <- calcNormFactors(dge$counts, method="TMM")
+# Create design matrix for downstream linear modeling with group information
+design <- model.matrix(~0 + dge$samples$group, data = dge$samples)
+
+# Estimate common dispersion, representing overall biological variability
+# This is important for proper differential analysis in edgeR
+dge <- estimateCommonDisp(dge, verbose=TRUE)
+# Biological coefficient of variation
+bcv <- sqrt(dge$common.dispersion)
+
+# Run voom transformation for preparing data for linear modeling (e.g., limma)
+# Generates mean-variance normalized values and an optional diagnostic plot
+# lib.size argument uses library sizes corrected by normalization factors
+# save.plot=TRUE saves the VOOM mean-variance plot
+vm <- voom(dge$counts, design, plot=TRUE, lib.size=colSums(dge$counts)*nf, save.plot=TRUE)
+```
+
+
+```{r pca plot, echo=FALSE}
+# Extract normalized data from voom output
+Normalized_data <- vm$E
+
+data1 <- Normalized_data
+
+# Calculate standard deviation for each feature (row)
+l <- apply(data1, 1, sd)
+# Sort standard deviations in decreasing order
+l <- sort(l, decreasing = TRUE)
+# Select the top 1000 most variable features based on SD
+d <- data1[names(l)[1:1000], ]
+
+# Load ggfortify library for easy PCA plotting
+library(ggfortify)
+
+# Perform PCA on the top 1000 variable features (transposed so samples are rows)
+pca_ori <- prcomp(t(d), scale. = TRUE)
+
+# Convert PCA results to a data frame for plotting
+df_out <- as.data.frame(pca_ori$x)
+
+# Add grouping and annotation information to the results data frame
+df_out$group <- meta_bulk$groups
+# Add sample names to results
+df_out$sample <- rownames(meta_bulk)
+# Add annotation columns for plotting aesthetics
+df_out$Region <- meta_bulk$Region
+df_out$Treatment <- meta_bulk$Treatment
+
+# Calculate proportion of variance explained (PoV) for each PC
+PoV <- pca_ori$sdev^2 / sum(pca_ori$sdev^2)
+# Convert this to percentage for axis labeling
+Percentage_var <- PoV * 100
+
+# Create PCA plot using ggplot2
+# - Color points by Treatment, shape by Region
+# - Label axes with percentage variance explained
+# - Draw confidence ellipses around each group
+# - Set plot title to be centered
+ggplot(df_out, aes(x = PC1, y = PC2, color = Treatment, shape = Region)) + 
+  xlab(paste('PC1 (', round(Percentage_var[1], digits = 2), '%)', sep = '')) + 
+  ylab(paste('PC2 (', round(Percentage_var[2], digits = 2), '%)', sep = '')) + 
+  geom_point(size = 4) +  
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  stat_ellipse()
+```
+
+
+
+```{r run deg, echo=FALSE}
+## Convert 'block_id' column in meta_bulk to a factor, representing experimental blocks
+groups_block <- factor(meta_bulk$block_id)
+
+# Convert 'Slide' column in meta_bulk to a factor, representing different slides used
+group_Slide <- factor(meta_bulk$Slide)
+
+# Convert 'condition' column in meta_bulk to a factor for primary experimental groups/conditions
+groups <- factor(meta_bulk$condition)
+
+# Create the design matrix including groups, block effects, and slide effects
+# '~0 +' omits the intercept and fits each group/block/slide as separate coefficients
+design <- model.matrix(~0 + groups + groups_block + group_Slide, data = dge$samples)
+
+# Define all relevant contrasts to test between groups in each anatomical region
+# Each contrast is a comparison of conditions (e.g., ADA NR vs PLB NR) for each region
+contrast.mat <- makeContrasts(
+  Epidermis_ADA_NR_vs_PLB_NR = groupsEpidermis_ADA_NR - groupsEpidermis_PLB_NR,
+  Dermis_ADA_NR_vs_PLB_NR = groupsDermis_ADA_NR - groupsDermis_PLB_NR,
+  Inflammation_ADA_NR_vs_PLB_NR = groupsInflammation_ADA_NR - groupsInflammation_PLB_NR,
+  Tendril_ADA_NR_vs_PLB_NR = groupsTendril.HF_ADA_NR - groupsTendril.HF_PLB_NR,
+  
+
+  levels = design)
+
+# Fit the linear model to the voom-transformed expression data using the design matrix
+fit <- lmFit(vm, design)
+
+# Apply the defined contrasts to the fitted model, for direct group comparison
+fit2 <- contrasts.fit(fit, contrast.mat)
+
+# Compute moderated t-statistics using empirical Bayes approach for robust statistical inference
+fit2 <- eBayes(fit2)
+```
+
+
+
+```{r save degs, echo=FALSE}
+# Set fold change threshold for defining significant differential expression
+fc = 2
+
+# Loop over all contrasts (each column in fit2$coefficients)
+for(i in 1:dim(fit2$coefficients)[2]) {
+  # Extract differential expression results for each contrast
+  DEG <- topTable(fit2, coef=colnames(fit2$coefficients)[i], number = nrow(vm$E), adjust.method = 'fdr')
+  # Create file name for saving all DEGs of this contrast
+  filename <- paste("DEGS_with_factors_added_as_variates/", colnames(fit2$coefficients)[i], ".csv", sep = "")
+  
+  # Save the full DEG results table to CSV
+  write.table(DEG, file=filename, quote=FALSE, sep=",", row.names=TRUE, col.names=TRUE)
+  
+  # Flag significant DEGs: logFC >= fc or <= -fc and adjusted p-value <= 0.05
+  DEG$threshold <- as.logical((DEG$logFC >= fc | DEG$logFC <= -fc) & DEG$adj.P.Val <= 0.05)
+  # Subset to significant DEGs
+  Sign_DEG <- DEG[which(DEG$threshold == TRUE), ]
+  # Count upregulated genes (logFC >= fc)
+  upreg <- length(which(Sign_DEG$logFC >= fc))
+  # Count downregulated genes (logFC <= -fc)
+  downreg <- length(which(Sign_DEG$logFC <= -fc))
+  # Subset upregulated genes
+  Up_DEG <- Sign_DEG[which(Sign_DEG$logFC >= fc), ]
+  # Create filename for upregulated DEGs
+  filename <- paste("DEGS_with_factors_added_as_variates/Up/UP_", colnames(fit2$coefficients)[i], ".csv", sep = "")
+  # Save upregulated DEGs to CSV
+  write.table(Up_DEG, file=filename, quote=FALSE, sep=",", row.names=TRUE, col.names=TRUE)
+  
+  # Subset downregulated genes
+  Down_DEG <- Sign_DEG[which(Sign_DEG$logFC <= -fc), ]
+  # Create filename for downregulated DEGs
+  filename <- paste("DEGS_with_factors_added_as_variates/Down/Down_", colnames(fit2$coefficients)[i], ".csv", sep = "")
+  # Save downregulated DEGs to CSV
+  write.table(Down_DEG, file=filename, quote=FALSE, sep=",", row.names=TRUE, col.names=TRUE)
+}
+```
+
+
+
+
