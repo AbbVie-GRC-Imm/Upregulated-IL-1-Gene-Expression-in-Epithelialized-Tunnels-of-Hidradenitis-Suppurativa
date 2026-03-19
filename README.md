@@ -1,7 +1,6 @@
 # Upregulated IL-1 Gene Expression in Epithelialized Tunnels of Hidradenitis Suppurativa
 
-The repository contains codes used to process the data used in the publication and generate all plots. These codes only use existing data packages and no new method/package has been developed. The codes are well commented. A brief disciption of each file is provided below:
-
+This repository contains thoroughly commented scripts used to process publication data and generate all associated plots. The codes exclusively rely on standard and publicly available data packages—no new methods or custom packages have been developed. Each file is briefly described below for clarity.
 
 1) Visium_Spatial_cluster_analysis.rmd - This pipeline processes and analyzes visiusm spatial transcriptomics data from multiple samples using Seurat in R. It covers data import, metadata integration, quality control, clustering, marker analysis, and generates visualizations and marker tables for downstream analysis.
 
