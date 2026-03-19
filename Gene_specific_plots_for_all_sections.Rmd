@@ -1,11 +1,11 @@
 ---
-title: "HS_Skin_TNF_expression"
+title: "HS_Skin_IL1B_expression"
 author: "Neha Chaudhary"
 date: "5/18/2023"
 output: html_document
 ---
 
-## TNF Expression in HS Skin Visium Sections
+## IL1B Expression in HS Skin Visium Sections
 
 ```{r setup, include=FALSE}
 ### Step 1) Setup the environment and load necessary libraries
@@ -29,7 +29,7 @@ Data <- readRDS("Data_object.rds")  # Load preprocessed data object
 # Optionally assign 'hs_all' object to 'Data' if needed
 Data <- hs_all  # Assign hs_all to Data for downstream analysis (if desired)
 
-gene <- "TNF"  # Specify the gene of interest for downstream analysis
+gene <- "IL1B"  # Specify the gene of interest for downstream analysis
 
 # DefaultAssay(Data) <- "Spatial"  # Optionally set assay to 'Spatial' if needed (currently commented out)
 
@@ -58,16 +58,16 @@ for(i in 1:53){
   data1 <- subset(x = Data, subset = sample == gsub("X", "", imagenames[i]))
 
   # Set the limits for color scaling the feature plot
-  min_lim <- 0  # Minimum value for TNF expression
-  max_lim <- signif(max(data1@assays$SCT["TNF",]), 2)  # Maximum TNF expression for current sample, rounded to 2 significant digits
+  min_lim <- 0  # Minimum value for IL1B expression
+  max_lim <- signif(max(data1@assays$SCT["IL1B",]), 2)  # Maximum TNF expression for current sample, rounded to 2 significant digits
 
-  # Create a spatial feature plot for gene expression ('TNF') with custom color gradient and dynamic limits
+  # Create a spatial feature plot for gene expression ('IL1B') with custom color gradient and dynamic limits
   c <- SpatialFeaturePlot(Data, features = c(gene), images = imagenames[i]) + 
        scale_fill_gradient2(low = "navyblue", mid = "green", high = "yellow", 
                             midpoint = (max_lim - min_lim)/2, space = "Lab", na.value = "grey50", 
                             guide = "colourbar", aesthetics = "fill", limits = c(min_lim, max_lim))
 
-  # Display all three plots side by side (H&E, annotation, TNF expression)
+  # Display all three plots side by side (H&E, annotation, IL1B expression)
   plot(a | b | c)
 }
 
