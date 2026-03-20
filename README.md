@@ -8,7 +8,7 @@ This repository contains thoroughly commented scripts used to process publicatio
 
 3) Run_RCTD_full_mode.Rmd - This pipeline runs cell type deconvolution for Visium spatial transcriptomics samples using RCTD with an integrated single-cell reference. It loads sample metadata, processes each sample through quality control and annotation, runs RCTD for cell-type assignment, and merges the results into a combined Seurat object for downstream analysis and visualization.
 
-4) Pseudobulk_gene_expression_Hs_Visium.Rmd - This pipeline performs pseudobulk spatial transcriptomics analysis on HS Visium data: it aggregates gene expression by region and treatment, filters low-quality samples, prepares metadata, carries out normalization and differential expression analysis (using edgeR and limma), and exports lists of significant up- and down-regulated genes for publication-ready downstream analyses.
+4) Pseudobulk_analysis_HS_Visium.Rmd - This pipeline performs pseudobulk spatial transcriptomics analysis on HS Visium data: it aggregates gene expression by region and treatment, filters low-quality samples, prepares metadata, carries out normalization and differential expression analysis (using edgeR and limma), and exports lists of significant up- and down-regulated genes for publication-ready downstream analyses.
 
 5) Over_representation_analysis.Rmd  - This pipeline performs GO-based pathway enrichment (over-representation) analysis on significant DEGs, using the clusterProfiler and related R packages. It identifies biological processes enriched in your gene set, saves results, and visualizes the top pathways with a dotplot for downstream interpretation.
 
